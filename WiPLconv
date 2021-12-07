@@ -1,0 +1,253 @@
+#! /usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+WiPL-SimRadar Conversion Tool
+
+Usage: WiPLconv <input_filename> -o <output_path> -d <debug_flag>
+
+Description:
+    Convert data from ascii human-readable file output by WiPL to a binary format readable by SimRadar.
+    Both programs have data in spherical co-ordinates on a domain of phi = 0 to 360 and theta = -90 to 90
+    and have complex values for E_phi & E_theta, and absolute values for RCS and RCS_db, so no numerical
+    conversion is carried out.
+    Assumption is made that input file has a 3 character file extension
+    
+Arguments:
+    input    - [REQUIRED] Positional argument.
+               The filename of the input ra1 format WiPL file, including the path to that file if 
+               not in the running directory
+               
+    --outdir - [OPTIONAL] Flagged argument 
+    -o         Path to the output directory. Will attempt to create the directory if it doesn't exist
+               Default to the directory containing the input file
+               
+    --debug  - [OPTIONAL] Flagged argument
+    -d         Flag for debug behaviour. If true rcs file will be converted back to human readable
+               text file to check for validationagainst the input file.
+
+Author: Christopher Symonds
+Date Created: 18 June 2021
+Institution: CEMAC, University of Leeds
+Contact: c.c.symonds@leeds.ac.uk               
+Credit: wipl_radiation_output_reader function written by R. Neely III, NCAS
+               
+"""
+import pandas as pd
+import numpy as np
+import fortranformat as ff
+import array
+import struct
+from os import path, makedirs
+import argparse
+from sys import stderr, exit
+
+class ArgumentsError(Exception):
+    '''
+    Exception raised when there is an error detected in the argument list.
+    '''
+    def __init__(self, msg):
+        stderr.write('[FATAL ERROR] : %s' % msg )
+        exit(9)
+
+class FatalError(Exception):
+    '''
+    Exception raised when there is an error detected in the argument list.
+    '''
+    def __init__(self, msg):
+        stderr.write('[FATAL ERROR] : %s' % msg )
+        exit(9)
+
+class FileError(Exception):
+    '''
+    Exception raised when contents of files are not as expected
+    '''
+    def __init__(self,msg):
+        stderr.write('[FILE ERROR] : %s' % msg )
+        exit(9)
+
+def readargs():
+    """
+    Read input arguments if run as separate program
+
+    Returns
+    -------
+    None.
+
+    """
+
+
+    parser = argparse.ArgumentParser(description=(
+        'Convert data from WiPL format to binary SimRadar-compatible format.'
+        ))
+
+    parser.add_argument('input',
+                        type=str,
+                        help='[REQUIRED] File to be converted')
+    parser.add_argument('--outdir', '-o',
+                        type=str,
+                        help='Output directory for rcs files, default as location of input file',
+                        default='.')
+    parser.add_argument('--debug', '-d',
+                        type=str,
+                        help=('[True/False] Flag for debug mode - writes file back out again in human readable'
+                              +' format after conversion to allow validation of converted data'),
+                        default='False')
+
+    args = parser.parse_args()
+
+    infile = args.input
+
+    if not path.isfile(infile):
+        raise ArgumentsError("Could not find file {}\n If file exists try again with absolute path rather than relative path")
+
+    path_out = args.outdir
+    
+    if path_out == '.':
+        inpath = path.split(infile)[0]
+        if inpath != '':
+            path_out = inpath
+
+    if not path.exists(path_out):
+        print('Directory to write rcs files to'
+              + ' does not exist\nAttempting to create:')
+        try:
+            makedirs(path_out)
+        except:
+            raise FatalError('Could not create directory '+ path_out +'\n')
+        else:
+            print ("Success!\n")
+
+    if path_out and not path.isdir(path_out):
+        raise ArgumentsError(path_out + ' exists but is not a directory\n')
+        
+    debug_str = args.debug
+    
+    if debug_str.lower() == "true" or debug_str.lower() == "t":
+        debug = True
+    elif debug_str.lower() == "false" or debug_str.lower() == "f":
+        debug = False
+    else:
+        raise ArgumentsError("Value for debug should be True/False. Value read was {}".format(debug_str))
+    
+
+    return (infile, path_out, debug)
+
+def readtest(bin_file):
+    
+    try:
+        with open(bin_file,'rb') as f:
+            file_content = f.read()
+    except:
+        raise FileError('Error reading binary file {} for checking'.format(bin_file))
+        
+    counts = array.array('H')
+    counts.frombytes(file_content[:4])
+
+    table = array.array('d')
+    table.frombytes(file_content[4:])
+    
+    table_array = np.array(table)
+    table_2d_array = np.reshape(table_array, (int(len(table)/6), 6))
+    
+    phi=[]
+    theta=[]
+    for j in range(counts[0]):
+        for i in range(counts[1]):
+            theta.append(((i*180/(counts[1]-1))-90))
+            phi.append(((j*360/(counts[0]-1))))
+        
+    table_2d_array_full = np.c_[phi,theta,table_2d_array]
+    
+    lineformat = ff.FortranRecordWriter('(8(1x,E23.15E3))')
+
+    line1 = "  >  Wave no.    1 0.940000E+01  GHz  {: >3d}  {: >3d}  å/ïý".format(counts[0],counts[1])
+    
+    fname_out = "{}_from_rcs.ra1".format(bin_file[:-4])
+    
+    
+    with open (fname_out,'w') as f_out :
+        f_out.write(line1+'\n')
+        for i in range(len(table_2d_array_full)):
+            f_out.write(lineformat.write(table_2d_array_full[i])+'\n')
+        
+    
+def wipl_radiation_output_reader(path_to_file):
+    
+    try:
+        ra1_df=pd.read_csv(path_to_file, sep=' ', skiprows=1, skipinitialspace=True,
+                      names=['phi','theta','E_phi_real','E_phi_imag','E_theta_real','E_theta_imag', 'RCS','RCS_dB'])
+    except:
+        FileError("Error in reading file {} for conversion to binary format".format(path_to_file))
+    
+    if len(path_to_file.split('/')[-1].split('_'))==8:
+        ra1_dict={'BugType' : path_to_file.split('/')[-1].split('_')[0], 
+                  'Specimen_Number' : path_to_file.split('/')[-1].split('_')[1],
+                  'BodyType' : path_to_file.split('/')[-1].split('_')[2],
+                  'WingPositioning' : path_to_file.split('/')[-1].split('_')[3],
+                  'Resolution' : int(path_to_file.split('/')[-1].split('_')[4])/10,
+                  'Scale' : int(path_to_file.split('/')[-1].split('_')[5])/10,
+                  'Frequency' : int(path_to_file.split('/')[-1].split('_')[6])/10,
+                  'InternalDomain' : path_to_file.split('/')[-1].split('_')[7].split('.')[0],
+                  'WingDomain' : 'NA'
+                  }
+    elif len(path_to_file.split('/')[-1].split('_'))==9:
+        ra1_dict={'BugType' : path_to_file.split('/')[-1].split('_')[0], 
+                  'Specimen_Number' : path_to_file.split('/')[-1].split('_')[1],
+                  'BodyType' : path_to_file.split('/')[-1].split('_')[2],
+                  'WingPositioning' : path_to_file.split('/')[-1].split('_')[3],
+                  'Resolution' : int(path_to_file.split('/')[-1].split('_')[4])/10,
+                  'Scale' : int(path_to_file.split('/')[-1].split('_')[5])/10,
+                  'Frequency' : int(path_to_file.split('/')[-1].split('_')[6])/10,
+                  'InternalDomain' : path_to_file.split('/')[-1].split('_')[7],
+                  'WingDomain' : path_to_file.split('/')[-1].split('_')[8].split('.')[0]
+                  }
+    
+    
+    return ra1_df, ra1_dict
+
+def subsetter(df):
+    
+    subset1 = df[df['phi']%2==0]
+    subset2 = subset1[subset1['theta']%2==0]
+    
+    subset2 = subset2.reset_index()
+    
+    return subset2
+
+
+def SimRadar_bin_output(df):
+    ba = bytearray(struct.pack('H',len(df['phi'].unique())))
+    ba += bytearray(struct.pack('H',len(df['theta'].unique())))
+    for i in range(len(df)):
+        ba += bytearray(struct.pack('d',df['E_phi_real'][i]))
+        ba += bytearray(struct.pack('d',df['E_phi_imag'][i]))
+        ba += bytearray(struct.pack('d',df['E_theta_real'][i]))
+        ba += bytearray(struct.pack('d',df['E_theta_imag'][i]))
+        ba += bytearray(struct.pack('d',df['RCS'][i]))
+        ba += bytearray(struct.pack('d',df['RCS_dB'][i]))
+
+    return ba
+
+def main():
+    
+    (path_to_file, path_out, debug) = readargs() 
+    
+    ra1_df, ra1_dict = wipl_radiation_output_reader(path_to_file)
+    
+    ra1_df = subsetter(ra1_df)
+    
+    ba = SimRadar_bin_output(ra1_df)
+    
+    filename = path.split(path_to_file)[1][:-4]+'.rcs'
+    
+    filepath = path.join(path_out,filename)
+    
+    with open(filepath,"wb") as out_file:
+        out_file.write(ba)
+        
+    if debug == True:
+        readtest(filepath)
+        
+    
+if __name__ == "__main__":
+    main()
